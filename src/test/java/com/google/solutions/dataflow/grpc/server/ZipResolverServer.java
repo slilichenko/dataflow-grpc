@@ -1,11 +1,11 @@
 /*
- * Copyright 2017 The gRPC Authors
+ * Copyright 2022 Google LLC
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *     http://www.apache.org/licenses/LICENSE-2.0
+ *     https://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -65,7 +65,9 @@ public class ZipResolverServer {
         .setCity(city).build());
   }
 
-  public void runWithoutWaitingForTermination(String[] args) throws IOException {
+  public int runWithoutWaitingForTermination(String[] args) throws IOException {
+    int port = Integer.parseInt(args[0]);
+
     ZipResolverGrpc.ZipResolverImplBase svc = new ZipResolverGrpc.ZipResolverImplBase() {
       @Override
       public StreamObserver<ResolveRequest> zipResolverStreaming(
@@ -179,25 +181,24 @@ public class ZipResolverServer {
     };
 
     server = ServerBuilder
-        .forPort(50051)
+        .forPort(port)
         .addService(svc)
         .build()
         .start();
 
     logger.info("Listening on " + server.getPort());
 
-    Runtime.getRuntime().addShutdownHook(new Thread() {
-      @Override
-      public void run() {
-        // Use stderr here since the logger may have been reset by its JVM shutdown hook.
-        System.err.println("Shutting down");
-        try {
-          server.shutdown().awaitTermination(30, TimeUnit.SECONDS);
-        } catch (InterruptedException e) {
-          e.printStackTrace(System.err);
-        }
+    Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+      // Use stderr here since the logger may have been reset by its JVM shutdown hook.
+      System.err.println("Shutting down");
+      try {
+        server.shutdown().awaitTermination(30, TimeUnit.SECONDS);
+      } catch (InterruptedException e) {
+        e.printStackTrace(System.err);
       }
-    });
+    }));
+
+    return server.getPort();
   }
 
 }

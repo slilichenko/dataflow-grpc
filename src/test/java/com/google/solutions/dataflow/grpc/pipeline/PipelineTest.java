@@ -1,11 +1,11 @@
 /*
- * Copyright 2016 The gRPC Authors
+ * Copyright 2022 Google LLC
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *     http://www.apache.org/licenses/LICENSE-2.0
+ *     https://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -18,15 +18,11 @@ package com.google.solutions.dataflow.grpc.pipeline;
 
 import com.google.solutions.dataflow.grpc.model.PartialAddress;
 import com.google.solutions.dataflow.grpc.server.ZipResolverServer;
-import io.grpc.util.MutableHandlerRegistry;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.Collection;
-import java.util.Collections;
 import java.util.List;
 import java.util.stream.Collectors;
-import javax.print.attribute.standard.MediaSize.Other;
 import org.apache.beam.sdk.testing.PAssert;
 import org.apache.beam.sdk.testing.TestPipeline;
 import org.apache.beam.sdk.transforms.Create;
@@ -34,31 +30,32 @@ import org.apache.beam.sdk.transforms.ParDo;
 import org.apache.beam.sdk.values.KV;
 import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.PCollectionTuple;
-import org.apache.beam.sdk.values.TupleTag;
 import org.apache.beam.sdk.values.TupleTagList;
 import org.junit.After;
 import org.junit.Before;
+import org.junit.BeforeClass;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
+import org.slf4j.LoggerFactory;
 
 
 @RunWith(JUnit4.class)
 public class PipelineTest {
-
-  private static final int PORT = 50001;
-
   @Rule
   public final transient TestPipeline testPipeline = TestPipeline.create();
 
   private ZipResolverServer zipResolverServer;
+  private int grpcServerPort;
 
   @Before
   public void setUp() throws IOException {
 
     zipResolverServer = new ZipResolverServer();
-    zipResolverServer.runWithoutWaitingForTermination(new String[]{String.valueOf(PORT)});
+
+    // Start the server on port 0. It will force it to pick the next availalbe port.
+    grpcServerPort = zipResolverServer.runWithoutWaitingForTermination(new String[]{"0"});
     new Thread(() -> {
       try {
         zipResolverServer.awaitTermination();
@@ -96,7 +93,7 @@ public class PipelineTest {
 
     PCollectionTuple resolutionOutcome = testPipeline
         .apply("Create requests", Create.of(zipsToProcess))
-        .apply("Resolve Zip", ParDo.of(new ZipResolverDoFn())
+        .apply("Resolve Zip", ParDo.of(new ZipResolverDoFn("localhost", grpcServerPort))
             .withOutputTags(ZipResolverDoFn.successfullyResolvedTag,
                 TupleTagList.of(ZipResolverDoFn.failedToResolveTag)));
 

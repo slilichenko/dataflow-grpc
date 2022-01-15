@@ -1,10 +1,26 @@
 
 
+/*
+ * Copyright 2022 Google LLC
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.google.solutions.dataflow.grpc.pipeline;
 
+import com.google.common.base.Stopwatch;
 import com.google.solutions.dataflow.grpc.ResolveRequest;
 import com.google.solutions.dataflow.grpc.ResolveResponse;
-import com.google.solutions.dataflow.grpc.ResolvedAddress;
 import com.google.solutions.dataflow.grpc.ZipResolverGrpc;
 import com.google.solutions.dataflow.grpc.ZipResolverGrpc.ZipResolverStub;
 import com.google.solutions.dataflow.grpc.model.PartialAddress;
@@ -33,64 +49,67 @@ import org.joda.time.Instant;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+/**
+ * DoFn to convert a US Postal Service ZIP code into a ${@link PartialAddress} with the ZIP, state
+ * abbreviation and the city.
+ *
+ * It uses a gRPC service to look up the data. There are two outputs: - PCollection of resolved
+ * ${@link PartialAddress}es - PCollection of failed lookups as ${@link KV} of ZIP and failure
+ * reason
+ */
 public class ZipResolverDoFn extends DoFn<String, PartialAddress> {
 
   private static final Logger logger = LoggerFactory.getLogger(ZipResolverDoFn.class);
 
+  /*
+   * Output tags
+   */
   public static final TupleTag<PartialAddress> successfullyResolvedTag = new TupleTag<>() {
   };
   public static final TupleTag<KV<String, String>> failedToResolveTag = new TupleTag<>() {
   };
 
   public static final Distribution grpcDurationMetric = Metrics
-      .distribution(ZipResolverDoFn.class, "grpcDuration");
+      .distribution(ZipResolverDoFn.class, "grpcDurationMs");
 
   public static final Distribution bundleSizeMetric = Metrics
       .distribution(ZipResolverDoFn.class, "bundleSize");
 
   private ZipResolverStub stub;
   private ManagedChannel channel;
-  private int bundleSize;
-  private AtomicBoolean allRequestsQueued;
-  private Queue<RequestElement> requestQueue;
-  private Collection<ResponseElement> successfulResponses;
-  private Collection<FailureElement> failureResponses;
-
-  private CountDownLatch allResponsesProcessed;
   private StreamObserver<ResolveRequest> streamObserver;
 
-  private Map<String, BundleElement> bundleElementsByRequestId;
+  private int bundleSize;
+  private Stopwatch stopwatch;
 
-  static class BundleElement {
+  private AtomicBoolean allRequestsQueued;
+  private Queue<ResolveRequest> requests;
+
+  private Collection<ResolveResponse> responses;
+  private CountDownLatch allResponsesProcessed;
+
+  private Map<String, PCollectionElement> bundleElementsByRequestId;
+
+  private final String gRPCServerHost;
+  private final int gRPCServerPort;
+
+  public ZipResolverDoFn(String gRPCServerHost, int gRPCServerPort) {
+    this.gRPCServerHost = gRPCServerHost;
+    this.gRPCServerPort = gRPCServerPort;
+  }
+
+  static class PCollectionElement {
 
     String zip;
     Instant timestamp;
     BoundedWindow window;
   }
 
-  static class RequestElement {
-
-    String requestId;
-    String zip;
-  }
-
-  static class ResponseElement {
-
-    String requestId;
-    ResolvedAddress resolvedAddress;
-  }
-
-  static class FailureElement {
-
-    String requestId;
-    String failureReason;
-  }
-
   @Setup
   public void setup() {
     // Create a channel and a stub
     channel = ManagedChannelBuilder
-        .forAddress("localhost", 50051)
+        .forAddress(gRPCServerHost, gRPCServerPort)
         .usePlaintext()
         .build();
     stub = ZipResolverGrpc.newStub(channel);
@@ -99,11 +118,12 @@ public class ZipResolverDoFn extends DoFn<String, PartialAddress> {
   @StartBundle
   public void startBundle() {
     allRequestsQueued = new AtomicBoolean(false);
-    requestQueue = new ConcurrentLinkedQueue<>();
-    successfulResponses = new ArrayList<>();
-    failureResponses = new ArrayList<>();
+    requests = new ConcurrentLinkedQueue<>();
+    responses = new ArrayList<>();
     allResponsesProcessed = new CountDownLatch(1);
     bundleElementsByRequestId = new ConcurrentHashMap<>();
+
+    stopwatch = Stopwatch.createStarted();
 
     // When using manual flow-control and back-pressure on the client, the ClientResponseObserver handles both
     // request and response streams.
@@ -134,8 +154,8 @@ public class ZipResolverDoFn extends DoFn<String, PartialAddress> {
             requestStream.setOnReadyHandler(() -> {
               // Start generating values from where we left off on a non-gRPC thread.
               while (requestStream.isReady()) {
-                RequestElement requestElement = requestQueue.poll();
-                if (requestElement == null) {
+                ResolveRequest request = requests.poll();
+                if (request == null) {
                   if (allRequestsQueued.get()) {
                     // Signal completion if there is nothing left to send.
                     requestStream.onCompleted();
@@ -144,10 +164,7 @@ public class ZipResolverDoFn extends DoFn<String, PartialAddress> {
                     break;
                   }
                 } else {
-                  logger.info("--> " + requestElement.requestId + " " + requestElement.zip);
-                  ResolveRequest request = ResolveRequest.newBuilder()
-                      .setRequestId(requestElement.requestId)
-                      .setZip(requestElement.zip).build();
+                  logger.debug("Requesting " + request);
                   requestStream.onNext(request);
                 }
               }
@@ -156,28 +173,8 @@ public class ZipResolverDoFn extends DoFn<String, PartialAddress> {
 
           @Override
           public void onNext(ResolveResponse response) {
-            logger.info("<-- " + response.getOutcome() + " " + response.getResolvedAddress());
-
-            switch (response.getOutcome()) {
-              case success:
-                ResponseElement responseElement = new ResponseElement();
-                responseElement.requestId = response.getRequestId();
-                responseElement.resolvedAddress = response.getResolvedAddress();
-                successfulResponses.add(responseElement);
-                break;
-
-              case failure:
-                FailureElement e = new FailureElement();
-                e.requestId = response.getRequestId();
-                e.failureReason = response.getFailureReason();
-                failureResponses.add(e);
-                break;
-
-              default:
-                throw new RuntimeException(
-                    "Unexpected outcome of the gRPC call: " + response.getOutcome());
-            }
-
+            logger.debug("<-- " + response.getOutcome() + " " + response.getResolvedAddress());
+            responses.add(response);
             // Signal the sender to send one message. TODO: test increasing this response
             requestStream.request(1);
           }
@@ -191,7 +188,7 @@ public class ZipResolverDoFn extends DoFn<String, PartialAddress> {
 
           @Override
           public void onCompleted() {
-            logger.info("All Done");
+            logger.debug("gRPC processing is complete.");
             allResponsesProcessed.countDown();
           }
         };
@@ -205,14 +202,14 @@ public class ZipResolverDoFn extends DoFn<String, PartialAddress> {
   public void processElement(@Element String zip, BoundedWindow window,
       @Timestamp Instant timestamp) {
     ++bundleSize;
-    String requestId = UUID.randomUUID().toString();
-    RequestElement requeestElement = new RequestElement();
-    requeestElement.requestId = requestId;
-    requeestElement.zip = zip;
+    var requestId = UUID.randomUUID().toString();
+    var request = ResolveRequest.newBuilder()
+        .setRequestId(requestId)
+        .setZip(zip).build();
 
-    requestQueue.add(requeestElement);
+    requests.add(request);
 
-    BundleElement bundleElement = new BundleElement();
+    var bundleElement = new PCollectionElement();
     bundleElement.zip = zip;
     bundleElement.timestamp = timestamp;
     bundleElement.window = window;
@@ -234,32 +231,38 @@ public class ZipResolverDoFn extends DoFn<String, PartialAddress> {
       }
     }
 
-    successfulResponses.forEach(responseElement -> {
-          String requestId = responseElement.requestId;
-          ResolvedAddress response = responseElement.resolvedAddress;
-          BundleElement bundleElement = bundleElementsByRequestId.get(requestId);
-          if (bundleElement == null) {
+    stopwatch.stop();
+    grpcDurationMetric.update(stopwatch.elapsed(TimeUnit.MILLISECONDS) / bundleSize);
+
+    responses.forEach(response -> {
+          var requestId = response.getRequestId();
+          var pCollectionElement = bundleElementsByRequestId.get(requestId);
+          if (pCollectionElement == null) {
             throw new RuntimeException("Unable to find bundle element by id: " + requestId);
           }
 
-          context.output(successfullyResolvedTag,
-              PartialAddress.create(bundleElement.zip, response.getState(), response.getCity()),
-              bundleElement.timestamp, bundleElement.window
-          );
+          switch (response.getOutcome()) {
+            case success:
+              var resolvedAddress = response.getResolvedAddress();
+              context.output(successfullyResolvedTag,
+                  PartialAddress.create(pCollectionElement.zip, resolvedAddress.getState(),
+                      resolvedAddress.getCity()),
+                  pCollectionElement.timestamp, pCollectionElement.window
+              );
+              break;
+
+            case failure:
+              context.output(failedToResolveTag,
+                  KV.of(pCollectionElement.zip, response.getFailureReason()),
+                  pCollectionElement.timestamp, pCollectionElement.window);
+              break;
+
+            default:
+              throw new RuntimeException(
+                  "Unexpected outcome of the gRPC call: " + response.getOutcome());
+          }
         }
     );
-
-    failureResponses.forEach(failedResponse -> {
-      String requestId = failedResponse.requestId;
-      String failureReason = failedResponse.failureReason;
-      BundleElement bundleElement = bundleElementsByRequestId.get(requestId);
-      if (bundleElement == null) {
-        throw new RuntimeException("Unable to find bundle element by id: " + requestId);
-      }
-      context.output(failedToResolveTag, KV.of(bundleElement.zip, failureReason),
-          bundleElement.timestamp, bundleElement.window);
-    });
-
   }
 
   @Teardown
