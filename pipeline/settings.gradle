@@ -14,17 +14,4 @@
  * limitations under the License.
  */
 
-pluginManagement {
-    repositories {
-        maven { // The google mirror is less flaky than mavenCentral()
-            url "https://maven-central.storage-download.googleapis.com/maven2/"
-        }
-        gradlePluginPortal()
-    }
-}
-
-rootProject.name = 'dataflow-grpc'
-include 'grpc-core'
-include 'grpc-server'
-include 'pipeline'
-
+rootProject.name = 'pipeline'

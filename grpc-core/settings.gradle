@@ -23,8 +23,6 @@ pluginManagement {
     }
 }
 
-rootProject.name = 'dataflow-grpc'
-include 'grpc-core'
-include 'grpc-server'
-include 'pipeline'
+rootProject.name = 'grpc-api'
+
 

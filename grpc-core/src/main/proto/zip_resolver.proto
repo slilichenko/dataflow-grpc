@@ -1,0 +1,36 @@
+syntax = "proto3";
+
+option java_multiple_files = true;
+option java_package = "com.google.solutions.grpc";
+option java_outer_classname = "ZipToStateAndCityResolverProto";
+option objc_class_prefix = "ZTSCR";
+
+package zip_resolver;
+
+service ZipResolver {
+  rpc ZipResolverStreaming (stream ResolveRequest) returns (stream ResolveResponse) {}
+}
+
+message ResolveRequest {
+  string request_id = 1;
+  string zip = 2;
+}
+
+message ResolvedAddress {
+  string state = 1;
+  string city = 2;
+}
+
+message ResolveResponse {
+  string request_id = 1;
+  enum Outcome {
+    unused = 0;
+    success = 1;
+    failure = 2;
+  };
+  Outcome outcome = 2;
+  oneof result {
+    ResolvedAddress resolved_address = 3;
+    string failure_reason = 4;
+  }
+}

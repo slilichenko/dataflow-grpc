@@ -14,17 +14,18 @@
  * limitations under the License.
  */
 
-pluginManagement {
-    repositories {
-        maven { // The google mirror is less flaky than mavenCentral()
-            url "https://maven-central.storage-download.googleapis.com/maven2/"
-        }
-        gradlePluginPortal()
-    }
+package com.google.solutions.grpc.server;
+
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.Test;
+import org.springframework.boot.test.context.SpringBootTest;
+
+@SpringBootTest
+class ApplicationTests {
+
+
+  // @Test
+  // void contextLoads() {
+  // }
+
 }
-
-rootProject.name = 'dataflow-grpc'
-include 'grpc-core'
-include 'grpc-server'
-include 'pipeline'
-
