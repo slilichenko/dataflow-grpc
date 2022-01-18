@@ -50,10 +50,6 @@ dependencies {
     testImplementation 'org.springframework.boot:spring-boot-starter-test'
 }
 
-test {
-    useJUnitPlatform()
-}
-
 publishing {
     publications {
         maven(MavenPublication) {

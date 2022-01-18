@@ -19,6 +19,13 @@
 set -u
 set -e
 
-gcloud run deploy zip-resolver --max-instances 2 --use-http2 \
- --image gcr.io/dataflow-jdbc-sync/zip-resolver --region us-central1 \
-  --allow-unauthenticated
+MAX_INSTANCES=2
+IMAGE=gcr.io/${PROJECT_ID}/zip-resolver
+SERVICE_NAME=zip-resolver
+
+./gradlew jib --image=${IMAGE}
+gcloud run deploy ${SERVICE_NAME} --max-instances ${MAX_INSTANCES} --use-http2 \
+ --image ${IMAGE} --region ${REGION} --allow-unauthenticated
+
+export GRPC_HOST=$(gcloud run services describe ${SERVICE_NAME} --region ${REGION} --format 'value(status.url.basename())') 
+echo "gRPC server is available on ${GRPC_HOST}"
