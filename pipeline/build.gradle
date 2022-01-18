@@ -16,7 +16,7 @@
 
 plugins {
     id 'java'
-
+    id 'application'
     id 'idea'
 }
 
@@ -58,4 +58,14 @@ dependencies {
     testImplementation group: 'org.hamcrest', name: 'hamcrest-core', version: '1.3'
     testImplementation group: 'org.hamcrest', name: 'hamcrest-library', version: '1.3'
     testImplementation 'junit:junit:4.13.2'
+}
+
+application {
+    mainClassName = "com.google.solutions.grpc.pipeline.ZipCodeResolvingPipeline"
+}
+
+run {
+    if (project.hasProperty('args')) {
+        args project.args.split('\\s')
+    }
 }

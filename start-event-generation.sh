@@ -1,5 +1,3 @@
-#!/usr/bin/env bash
-
 #
 # Copyright 2022 Google LLC
 #
@@ -16,9 +14,15 @@
 # limitations under the License.
 #
 
-set -u
 set -e
+set -u
 
-gcloud run deploy zip-resolver --max-instances 2 --use-http2 \
- --image gcr.io/dataflow-jdbc-sync/zip-resolver --region us-central1 \
-  --allow-unauthenticated
+QPS=$1
+JOB_NAME=data-generator-${QPS}
+gcloud dataflow flex-template run ${JOB_NAME} \
+    --project=${PROJECT_ID} \
+    --region=${REGION} \
+    --template-file-gcs-location=gs://dataflow-templates/latest/flex/Streaming_Data_Generator \
+    --parameters schemaLocation=${EVENT_GENERATOR_TEMPLATE} \
+    --parameters qps=${QPS} \
+    --parameters topic=${REQUEST_TOPIC}

@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-
 #
 # Copyright 2022 Google LLC
 #
@@ -17,8 +16,17 @@
 #
 
 set -u
-set -e
 
-gcloud run deploy zip-resolver --max-instances 2 --use-http2 \
- --image gcr.io/dataflow-jdbc-sync/zip-resolver --region us-central1 \
-  --allow-unauthenticated
+export TF_VAR_project_id=${PROJECT_ID}
+
+cd terraform
+terraform init && terraform apply
+
+export EVENT_GENERATOR_TEMPLATE=$(terraform output -raw event-generator-template)
+export REQUEST_TOPIC=$(terraform output -raw resolve-zip-topic)
+export REQUEST_SUB=$(terraform output -raw resolve-zip-subscription)
+export DATAFLOW_TEMP_BUCKET=gs://$(terraform output -raw dataflow-temp-bucket)
+export OUTPUT_BUCKET=$(terraform output -raw data-bucket)
+export REGION=$(terraform output -raw region)
+
+cd ..

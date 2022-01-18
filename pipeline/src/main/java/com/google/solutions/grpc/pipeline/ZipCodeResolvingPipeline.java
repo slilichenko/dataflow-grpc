@@ -32,10 +32,14 @@ import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.PCollectionTuple;
 import org.apache.beam.sdk.values.TupleTagList;
 import org.joda.time.Duration;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 public class ZipCodeResolvingPipeline {
 
-  interface Options extends PipelineOptions {
+  private static final Logger logger = LoggerFactory.getLogger(ZipCodeResolvingPipeline.class);
+
+  public interface Options extends PipelineOptions {
 
     @Required
     String getGrpcHost();
@@ -43,9 +47,9 @@ public class ZipCodeResolvingPipeline {
     void setGrpcHost(String value);
 
     @Required
-    String getSubscription();
+    String getSubscriptionId();
 
-    void setSubscription(String value);
+    void setSubscriptionId(String value);
 
     @Required
     String getOutputBucket();
@@ -54,12 +58,18 @@ public class ZipCodeResolvingPipeline {
   }
 
   public static void main(String[] args) {
-    Options options = PipelineOptionsFactory.as(Options.class);
+    Options options = PipelineOptionsFactory.fromArgs(args).withValidation().as(Options.class);
 
     Pipeline pipeline = Pipeline.create(options);
     PCollectionTuple resolutionOutcome = pipeline
         .apply("Read from PubSub", PubsubIO.readStrings().fromSubscription(
-            options.getSubscription()))
+            options.getSubscriptionId()))
+        .apply("Extract Zip", ParDo.of(new DoFn<String, String>() {
+          @ProcessElement
+          public void extract(@Element String jsonPayload, OutputReceiver<String> out) {
+            out.output(ParseUtil.parseZipOutOfJsonPayload(jsonPayload));
+          }
+        }))
         .apply("Resolve Zip", ParDo.of(
                 new ZipResolverDoFn(options.getGrpcHost(), 443, false))
             .withOutputTags(ZipResolverDoFn.successfullyResolvedTag,
@@ -77,6 +87,7 @@ public class ZipCodeResolvingPipeline {
         .apply("Fixed Window", Window.into(FixedWindows.of(Duration.standardMinutes(5))))
         .apply("Save Successfully Resolved",
             TextIO.write().to(options.getOutputBucket() + "/resolved").withSuffix("csv")
+                .withWindowedWrites()
                 .withNumShards(5));
 
     PCollection<KV<String, String>> failedToResolve = resolutionOutcome.get(
@@ -92,7 +103,10 @@ public class ZipCodeResolvingPipeline {
         .apply("Fixed Window", Window.into(FixedWindows.of(Duration.standardMinutes(5))))
         .apply("Save Failed to Resolved",
             TextIO.write().to(options.getOutputBucket() + "/failed").withSuffix("csv")
+                .withWindowedWrites()
                 .withNumShards(5));
+
+    pipeline.run();
   }
 
 }
