@@ -39,6 +39,7 @@ import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import org.apache.beam.sdk.metrics.Counter;
 import org.apache.beam.sdk.metrics.Distribution;
 import org.apache.beam.sdk.metrics.Metrics;
 import org.apache.beam.sdk.transforms.DoFn;
@@ -70,12 +71,14 @@ public class ZipResolverDoFn extends DoFn<String, PartialAddress> {
   };
 
   public static final Distribution grpcDurationMetric = Metrics
-      .distribution(ZipResolverDoFn.class, "grpcDurationMs");
+      .distribution(ZipResolverDoFn.class, "grpc-duration-ms");
 
   public static final Distribution bundleSizeMetric = Metrics
-      .distribution(ZipResolverDoFn.class, "bundleSize");
+      .distribution(ZipResolverDoFn.class, "bundle-size");
 
-  private ZipResolverStub stub;
+  public static final Counter gRPCFailures = Metrics
+      .counter(ZipResolverDoFn.class, "grpc-failures");
+
   private ManagedChannel channel;
   private StreamObserver<ResolveRequest> streamObserver;
 
@@ -93,11 +96,14 @@ public class ZipResolverDoFn extends DoFn<String, PartialAddress> {
   private final String gRPCServerHost;
   private final int gRPCServerPort;
   private final boolean gRPCUsePlainText;
+  private final int timeoutSeconds;
 
-  public ZipResolverDoFn(String gRPCServerHost, int gRPCServerPort, boolean usePlainText) {
+  public ZipResolverDoFn(String gRPCServerHost, int gRPCServerPort, boolean usePlainText,
+      int timeoutSeconds) {
     this.gRPCServerHost = gRPCServerHost;
     this.gRPCServerPort = gRPCServerPort;
     this.gRPCUsePlainText = usePlainText;
+    this.timeoutSeconds = timeoutSeconds;
   }
 
   static class PCollectionElement {
@@ -109,22 +115,23 @@ public class ZipResolverDoFn extends DoFn<String, PartialAddress> {
 
   @Setup
   public void setup() {
-    // Create a channel and a stub
+    // Create a channel
     ManagedChannelBuilder<?> managedChannelBuilder = ManagedChannelBuilder
         .forAddress(gRPCServerHost, gRPCServerPort);
     if(gRPCUsePlainText) {
       managedChannelBuilder = managedChannelBuilder.usePlaintext();
     }
     channel = managedChannelBuilder.build();
-    stub = ZipResolverGrpc.newStub(channel);
   }
 
   @StartBundle
   public void startBundle() {
     allRequestsQueued = new AtomicBoolean(false);
     requests = new ConcurrentLinkedQueue<>();
-    responses = new ArrayList<>();
+
     allResponsesProcessed = new CountDownLatch(1);
+    responses = new ArrayList<>();
+
     bundleElementsByRequestId = new ConcurrentHashMap<>();
 
     stopwatch = Stopwatch.createStarted();
@@ -161,10 +168,12 @@ public class ZipResolverDoFn extends DoFn<String, PartialAddress> {
                 ResolveRequest request = requests.poll();
                 if (request == null) {
                   if (allRequestsQueued.get()) {
-                    // Signal completion if there is nothing left to send.
+                    // Signals completion if there is nothing left to send.
+                    logger.debug("All requests are sent. Completing the request stream.");
                     requestStream.onCompleted();
                   } else {
-                    // Not all the requests are queued yet.
+                    // More requests are going to be queued. We shouldn't block the thread and return.
+                    logger.debug("No more items in the queue, but more requests are expected.");
                     break;
                   }
                 } else {
@@ -187,6 +196,7 @@ public class ZipResolverDoFn extends DoFn<String, PartialAddress> {
           public void onError(Throwable e) {
             // TODO: figure out if the pipeline should fail if this happens.
             logger.error("Failed to process requests", e);
+            gRPCFailures.inc();
             allResponsesProcessed.countDown();
           }
 
@@ -199,7 +209,10 @@ public class ZipResolverDoFn extends DoFn<String, PartialAddress> {
 
     // Note: clientResponseObserver is handling both request and response stream processing.
     // TODO: do we need to close the streamObserver?
-    streamObserver = stub.zipResolverStreaming(clientResponseObserver);
+    ZipResolverStub stub = ZipResolverGrpc.newStub(channel);
+    // TODO: shall we deal with deadlines?
+    // .withDeadlineAfter(timeoutSeconds, TimeUnit.SECONDS);
+    stub.zipResolverStreaming(clientResponseObserver);
   }
 
   @ProcessElement
@@ -223,18 +236,24 @@ public class ZipResolverDoFn extends DoFn<String, PartialAddress> {
 
   @FinishBundle
   public void finishBundle(FinishBundleContext context) {
+    logger.debug("Bundle requests are queued. Waiting for the gRPC server to finish responding.");
     allRequestsQueued = new AtomicBoolean(true);
     bundleSizeMetric.update(bundleSize);
 
     while (true) {
       try {
-        allResponsesProcessed.await();
-        break;
+        boolean success = allResponsesProcessed.await(timeoutSeconds * bundleSize, TimeUnit.SECONDS);
+        if(success) {
+          break;
+        } else {
+          throw new RuntimeException("Timeout exceeded");
+        }
       } catch (InterruptedException e) {
         logger.warn("Unexpected exception: ", e);
       }
     }
 
+    logger.debug("gRPC processing is completed.");
     stopwatch.stop();
     grpcDurationMetric.update(stopwatch.elapsed(TimeUnit.MILLISECONDS) / bundleSize);
 

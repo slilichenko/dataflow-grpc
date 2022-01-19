@@ -42,5 +42,6 @@ set -x
  --experiments=${EXPERIMENTS}\
  --grpcHost=${GRPC_HOST}\
  --outputBucket=${OUTPUT_BUCKET}\
+ --workerLogLevelOverrides={\"com.google.solutions.grpc.pipeline.ZipResolverDoFn\":\"DEBUG\"}\
  ${PARAMS}"
 

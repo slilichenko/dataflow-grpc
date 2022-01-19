@@ -93,7 +93,8 @@ public class PipelineTest {
 
     PCollectionTuple resolutionOutcome = testPipeline
         .apply("Create requests", Create.of(zipsToProcess))
-        .apply("Resolve Zip", ParDo.of(new ZipResolverDoFn("localhost", grpcServerPort, true))
+        .apply("Resolve Zip", ParDo.of(new ZipResolverDoFn("localhost", grpcServerPort, true,
+                10))
             .withOutputTags(ZipResolverDoFn.successfullyResolvedTag,
                 TupleTagList.of(ZipResolverDoFn.failedToResolveTag)));
 

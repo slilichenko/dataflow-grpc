@@ -20,6 +20,7 @@ import com.google.solutions.grpc.pipeline.model.PartialAddress;
 import org.apache.beam.sdk.Pipeline;
 import org.apache.beam.sdk.io.TextIO;
 import org.apache.beam.sdk.io.gcp.pubsub.PubsubIO;
+import org.apache.beam.sdk.options.Default;
 import org.apache.beam.sdk.options.PipelineOptions;
 import org.apache.beam.sdk.options.PipelineOptionsFactory;
 import org.apache.beam.sdk.options.Validation.Required;
@@ -55,6 +56,11 @@ public class ZipCodeResolvingPipeline {
     String getOutputBucket();
 
     void setOutputBucket(String value);
+
+    @Default.Integer(20)
+    int getTimeoutSeconds();
+
+    void setTimeoutSeconds(int value);
   }
 
   public static void main(String[] args) {
@@ -71,7 +77,7 @@ public class ZipCodeResolvingPipeline {
           }
         }))
         .apply("Resolve Zip", ParDo.of(
-                new ZipResolverDoFn(options.getGrpcHost(), 443, false))
+                new ZipResolverDoFn(options.getGrpcHost(), 443, false, options.getTimeoutSeconds()))
             .withOutputTags(ZipResolverDoFn.successfullyResolvedTag,
                 TupleTagList.of(ZipResolverDoFn.failedToResolveTag)));
 
