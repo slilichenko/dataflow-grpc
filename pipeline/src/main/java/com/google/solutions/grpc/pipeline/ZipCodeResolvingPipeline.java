@@ -33,12 +33,10 @@ import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.PCollectionTuple;
 import org.apache.beam.sdk.values.TupleTagList;
 import org.joda.time.Duration;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 public class ZipCodeResolvingPipeline {
 
-  private static final Logger logger = LoggerFactory.getLogger(ZipCodeResolvingPipeline.class);
+  // private static final Logger logger = LoggerFactory.getLogger(ZipCodeResolvingPipeline.class);
 
   public interface Options extends PipelineOptions {
 
@@ -61,6 +59,12 @@ public class ZipCodeResolvingPipeline {
     int getTimeoutSeconds();
 
     void setTimeoutSeconds(int value);
+
+    @Default.Integer(2)
+    int getWriteFrequencyMinutes();
+
+    void setWriteFrequencyMinutes(int value);
+
   }
 
   public static void main(String[] args) {
@@ -90,7 +94,8 @@ public class ZipCodeResolvingPipeline {
             out.output(address.getZip() + '|' + address.getState() + '|' + address.getCity());
           }
         }))
-        .apply("Fixed Window", Window.into(FixedWindows.of(Duration.standardMinutes(5))))
+        .apply("Fixed Window", Window.into(
+            FixedWindows.of(Duration.standardMinutes(options.getWriteFrequencyMinutes()))))
         .apply("Save Successfully Resolved",
             TextIO.write().to(options.getOutputBucket() + "/resolved").withSuffix("csv")
                 .withWindowedWrites()
@@ -106,7 +111,8 @@ public class ZipCodeResolvingPipeline {
             out.output(failedLookup.getKey() + '|' + failedLookup.getValue());
           }
         }))
-        .apply("Fixed Window", Window.into(FixedWindows.of(Duration.standardMinutes(5))))
+        .apply("Fixed Window", Window.into(
+            FixedWindows.of(Duration.standardMinutes(options.getWriteFrequencyMinutes()))))
         .apply("Save Failed to Resolved",
             TextIO.write().to(options.getOutputBucket() + "/failed").withSuffix("csv")
                 .withWindowedWrites()

@@ -3,8 +3,8 @@
     {
       "name": [
         {
-          "service": "helloworld.Greeter",
-          "method": "SayHello"
+          "service": "zip_resolver.ZipResolver",
+          "method": "ZipResolverStreaming"
         }
       ],
 
@@ -14,7 +14,7 @@
         "maxBackoff": "30s",
         "backoffMultiplier": 2,
         "retryableStatusCodes": [
-          "UNAVAILABLE"
+          "UNAVAILABLE", "INTERNAL"
         ]
       }
     }

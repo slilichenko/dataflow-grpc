@@ -116,8 +116,8 @@ public class ZipResolver {
               // TODO: request id logging through MDC
               logger.info("--> " + requestId + ' ' + zip);
 
-              // Simulate server "work"
-              Thread.sleep(random.nextInt(1000));
+              // Simulate server "work" - add from 20 to 120 ms delay.
+              Thread.sleep(20 + random.nextInt(100));
 
               // Send a response.
               ResolvedAddress resolvedAddress = database.get(zip);

@@ -19,15 +19,6 @@
 set -u
 set -e
 
-MAX_INSTANCES=10
-MEMORY=4Gi
-CONCURRENCY=200
-IMAGE=gcr.io/${PROJECT_ID}/zip-resolver
 SERVICE_NAME=zip-resolver
 
-./gradlew jib --image=${IMAGE}
-gcloud run deploy ${SERVICE_NAME} --max-instances ${MAX_INSTANCES} --use-http2 \
- --image ${IMAGE} --region ${REGION} --allow-unauthenticated --memory  ${MEMORY} \
-  --concurrency=${CONCURRENCY}
-
-echo "gRPC server is available on ${GRPC_HOST}"
+gcloud run services describe ${SERVICE_NAME} --region ${REGION} --format 'value(status.url.basename())'

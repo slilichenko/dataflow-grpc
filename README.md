@@ -28,7 +28,11 @@ in other scripts
 Steps below will build a server's Docker image, deploy it to the Container Registry,
 deploy the image to Cloud Run and store the URL of the gRPC server in GRPC_HOST environment variable. 
 
-  `cd grpc-server && source ./deploy-to-cloud-run.sh && cd ..`
+  `(cd grpc-server && ./deploy-to-cloud-run.sh && cd ..)`
+
+# Capture the gRPC server hostname
+
+  `export GRPC_HOST=$(grpc-server/get-server-hostname.sh)`
 
 # Deploy the pipeline
 

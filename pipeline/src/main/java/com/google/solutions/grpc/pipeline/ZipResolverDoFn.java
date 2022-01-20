@@ -18,7 +18,11 @@
 
 package com.google.solutions.grpc.pipeline;
 
+import static java.nio.charset.StandardCharsets.UTF_8;
+
 import com.google.common.base.Stopwatch;
+import com.google.gson.Gson;
+import com.google.gson.stream.JsonReader;
 import com.google.solutions.grpc.pipeline.model.PartialAddress;
 import com.google.solutions.grpc.ResolveRequest;
 import com.google.solutions.grpc.ResolveResponse;
@@ -29,8 +33,11 @@ import io.grpc.ManagedChannelBuilder;
 import io.grpc.stub.ClientCallStreamObserver;
 import io.grpc.stub.ClientResponseObserver;
 import io.grpc.stub.StreamObserver;
+import java.io.InputStream;
+import java.io.InputStreamReader;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.HashMap;
 import java.util.Map;
 import java.util.Queue;
 import java.util.UUID;
@@ -90,6 +97,7 @@ public class ZipResolverDoFn extends DoFn<String, PartialAddress> {
 
   private Collection<ResolveResponse> responses;
   private CountDownLatch allResponsesProcessed;
+  private AtomicBoolean failureProcessing;
 
   private Map<String, PCollectionElement> bundleElementsByRequestId;
 
@@ -121,16 +129,31 @@ public class ZipResolverDoFn extends DoFn<String, PartialAddress> {
     if(gRPCUsePlainText) {
       managedChannelBuilder = managedChannelBuilder.usePlaintext();
     }
+
+    Map<String, ?> serviceConfig = getRetryingServiceConfig();
+
+    managedChannelBuilder = managedChannelBuilder.defaultServiceConfig(serviceConfig).enableRetry();
     channel = managedChannelBuilder.build();
+  }
+
+  protected Map<String, ?> getRetryingServiceConfig() {
+    InputStream resourceAsStream = this.getClass().getClassLoader().getResourceAsStream(
+        "retrying_service_config.json");
+    return new Gson()
+        .fromJson(
+            new JsonReader(new InputStreamReader(resourceAsStream, UTF_8)),
+            Map.class);
   }
 
   @StartBundle
   public void startBundle() {
+    logger.debug("Starting bundle processing.");
     allRequestsQueued = new AtomicBoolean(false);
     requests = new ConcurrentLinkedQueue<>();
 
     allResponsesProcessed = new CountDownLatch(1);
     responses = new ArrayList<>();
+    failureProcessing = new AtomicBoolean(false);
 
     bundleElementsByRequestId = new ConcurrentHashMap<>();
 
@@ -196,7 +219,7 @@ public class ZipResolverDoFn extends DoFn<String, PartialAddress> {
           public void onError(Throwable e) {
             // TODO: figure out if the pipeline should fail if this happens.
             logger.error("Failed to process requests", e);
-            gRPCFailures.inc();
+            failureProcessing.set(true);
             allResponsesProcessed.countDown();
           }
 
@@ -220,6 +243,7 @@ public class ZipResolverDoFn extends DoFn<String, PartialAddress> {
       @Timestamp Instant timestamp) {
     ++bundleSize;
     var requestId = UUID.randomUUID().toString();
+    logger.debug("Generated request: " + requestId);
     var request = ResolveRequest.newBuilder()
         .setRequestId(requestId)
         .setZip(zip).build();
@@ -251,6 +275,11 @@ public class ZipResolverDoFn extends DoFn<String, PartialAddress> {
       } catch (InterruptedException e) {
         logger.warn("Unexpected exception: ", e);
       }
+    }
+
+    if(failureProcessing.get()) {
+      gRPCFailures.inc();
+      throw new RuntimeException("Failed to process the bundle.");
     }
 
     logger.debug("gRPC processing is completed.");
@@ -290,6 +319,9 @@ public class ZipResolverDoFn extends DoFn<String, PartialAddress> {
 
   @Teardown
   public void tearDown() {
+    if(channel == null) {
+      return;
+    }
     channel.shutdown();
     try {
       channel.awaitTermination(1, TimeUnit.SECONDS);
