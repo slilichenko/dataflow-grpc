@@ -81,7 +81,8 @@ public class ZipCodeResolvingPipeline {
           }
         }))
         .apply("Resolve Zip", ParDo.of(
-                new ZipResolverDoFn(options.getGrpcHost(), 443, false, options.getTimeoutSeconds()))
+                new ZipResolverDoFn(options.getGrpcHost(), 443, false
+                    /*, options.getTimeoutSeconds() */))
             .withOutputTags(ZipResolverDoFn.successfullyResolvedTag,
                 TupleTagList.of(ZipResolverDoFn.failedToResolveTag)));
 

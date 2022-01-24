@@ -23,29 +23,28 @@ import static java.nio.charset.StandardCharsets.UTF_8;
 import com.google.common.base.Stopwatch;
 import com.google.gson.Gson;
 import com.google.gson.stream.JsonReader;
-import com.google.solutions.grpc.pipeline.model.PartialAddress;
+import com.google.solutions.grpc.GRPCBidiCallProcessor;
+import com.google.solutions.grpc.GRPCBidiCallProcessor.BidiMethodStarter;
+import com.google.solutions.grpc.GRPCBidiCallProcessor.ResponseReceiver;
 import com.google.solutions.grpc.ResolveRequest;
 import com.google.solutions.grpc.ResolveResponse;
 import com.google.solutions.grpc.ZipResolverGrpc;
 import com.google.solutions.grpc.ZipResolverGrpc.ZipResolverStub;
+import com.google.solutions.grpc.pipeline.model.PartialAddress;
 import io.grpc.ManagedChannel;
 import io.grpc.ManagedChannelBuilder;
-import io.grpc.stub.ClientCallStreamObserver;
-import io.grpc.stub.ClientResponseObserver;
-import io.grpc.stub.StreamObserver;
 import java.io.InputStream;
 import java.io.InputStreamReader;
-import java.util.ArrayList;
+import java.io.Serializable;
 import java.util.Collection;
-import java.util.HashMap;
 import java.util.Map;
 import java.util.Queue;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
-import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 import org.apache.beam.sdk.metrics.Counter;
 import org.apache.beam.sdk.metrics.Distribution;
 import org.apache.beam.sdk.metrics.Metrics;
@@ -53,6 +52,7 @@ import org.apache.beam.sdk.transforms.DoFn;
 import org.apache.beam.sdk.transforms.windowing.BoundedWindow;
 import org.apache.beam.sdk.values.KV;
 import org.apache.beam.sdk.values.TupleTag;
+import org.joda.time.Duration;
 import org.joda.time.Instant;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -86,32 +86,46 @@ public class ZipResolverDoFn extends DoFn<String, PartialAddress> {
   public static final Counter gRPCFailures = Metrics
       .counter(ZipResolverDoFn.class, "grpc-failures");
 
-  private ManagedChannel channel;
-  private StreamObserver<ResolveRequest> streamObserver;
+  private static ManagedChannel channel;
+  private static final Lock channelLock = new ReentrantLock();
+  private static int numberOfChannelUsers = 0;
 
   private int bundleSize;
   private Stopwatch stopwatch;
 
-  private AtomicBoolean allRequestsQueued;
   private Queue<ResolveRequest> requests;
-
   private Collection<ResolveResponse> responses;
-  private CountDownLatch allResponsesProcessed;
-  private AtomicBoolean failureProcessing;
-
+  private Map<String, ResolveRequest> unprocessedRequests;
   private Map<String, PCollectionElement> bundleElementsByRequestId;
+  private final ResponseReceiver<ResolveResponse> resolveResponseReceiver =
+      (ResponseReceiver<ResolveResponse> & Serializable) response -> {
+        if (unprocessedRequests.remove(response.getRequestId()) == null) {
+          // TODO: more complex error handling - something is very wrong here.
+          logger.warn("Failed to find the request by id: " + response.getRequestId());
+          return;
+        }
+        responses.add(response);
+      };
+  private final GRPCBidiCallProcessor.BidiMethodStarter<ResolveRequest, ResolveResponse> starter =
+      (BidiMethodStarter<ResolveRequest, ResolveResponse> & Serializable) (clientResponseObserver) -> {
+        // Note: clientResponseObserver is handling both request and response stream processing.
+        // TODO: do we need to close the streamObserver?
+        ZipResolverStub stub = ZipResolverGrpc.newStub(channel);
+        // TODO: shall we deal with deadlines?
+        // .withDeadlineAfter(timeoutSeconds, TimeUnit.SECONDS);
+        stub.zipResolverStreaming(clientResponseObserver);
+      };
 
   private final String gRPCServerHost;
   private final int gRPCServerPort;
   private final boolean gRPCUsePlainText;
-  private final int timeoutSeconds;
 
-  public ZipResolverDoFn(String gRPCServerHost, int gRPCServerPort, boolean usePlainText,
-      int timeoutSeconds) {
+  private GRPCBidiCallProcessor<ResolveRequest, ResolveResponse> callProcessor;
+
+  public ZipResolverDoFn(String gRPCServerHost, int gRPCServerPort, boolean usePlainText) {
     this.gRPCServerHost = gRPCServerHost;
     this.gRPCServerPort = gRPCServerPort;
     this.gRPCUsePlainText = usePlainText;
-    this.timeoutSeconds = timeoutSeconds;
   }
 
   static class PCollectionElement {
@@ -123,17 +137,29 @@ public class ZipResolverDoFn extends DoFn<String, PartialAddress> {
 
   @Setup
   public void setup() {
-    // Create a channel
-    ManagedChannelBuilder<?> managedChannelBuilder = ManagedChannelBuilder
-        .forAddress(gRPCServerHost, gRPCServerPort);
-    if(gRPCUsePlainText) {
-      managedChannelBuilder = managedChannelBuilder.usePlaintext();
+    channelLock.lock();
+    try {
+      numberOfChannelUsers++;
+
+      if (channel != null) {
+        logger.debug("Reusing an existing gRPC channel for " + this.getClass().getName());
+        return;
+      }
+      logger.info("Creating a gRPC channel for " + this.getClass().getName());
+      ManagedChannelBuilder<?> managedChannelBuilder = ManagedChannelBuilder
+          .forAddress(gRPCServerHost, gRPCServerPort);
+      if (gRPCUsePlainText) {
+        managedChannelBuilder = managedChannelBuilder.usePlaintext();
+      }
+
+      Map<String, ?> serviceConfig = getRetryingServiceConfig();
+
+      managedChannelBuilder = managedChannelBuilder.defaultServiceConfig(serviceConfig)
+          .enableRetry();
+      channel = managedChannelBuilder.build();
+    } finally {
+      channelLock.unlock();
     }
-
-    Map<String, ?> serviceConfig = getRetryingServiceConfig();
-
-    managedChannelBuilder = managedChannelBuilder.defaultServiceConfig(serviceConfig).enableRetry();
-    channel = managedChannelBuilder.build();
   }
 
   protected Map<String, ?> getRetryingServiceConfig() {
@@ -148,94 +174,14 @@ public class ZipResolverDoFn extends DoFn<String, PartialAddress> {
   @StartBundle
   public void startBundle() {
     logger.debug("Starting bundle processing.");
-    allRequestsQueued = new AtomicBoolean(false);
     requests = new ConcurrentLinkedQueue<>();
-
-    allResponsesProcessed = new CountDownLatch(1);
-    responses = new ArrayList<>();
-    failureProcessing = new AtomicBoolean(false);
-
+    responses = new ConcurrentLinkedQueue<>();
+    unprocessedRequests = new ConcurrentHashMap<>();
     bundleElementsByRequestId = new ConcurrentHashMap<>();
 
     stopwatch = Stopwatch.createStarted();
-
-    // When using manual flow-control and back-pressure on the client, the ClientResponseObserver handles both
-    // request and response streams.
-    ClientResponseObserver<ResolveRequest, ResolveResponse> clientResponseObserver =
-        new ClientResponseObserver<>() {
-
-          ClientCallStreamObserver<ResolveRequest> requestStream;
-
-          @Override
-          public void beforeStart(final ClientCallStreamObserver<ResolveRequest> requestStream) {
-            this.requestStream = requestStream;
-            // Set up manual flow control for the response stream. It feels backwards to configure the response
-            // stream's flow control using the request stream's observer, but this is the way it is.
-            // TODO: check how the parameter affects performance.
-            requestStream.disableAutoRequestWithInitial(1);
-
-            // Set up a back-pressure-aware producer for the request stream. The onReadyHandler will be invoked
-            // when the consuming side has enough buffer space to receive more messages.
-            //
-            // Messages are serialized into a transport-specific transmit buffer. Depending on the size of this buffer,
-            // MANY messages may be buffered, however, they haven't yet been sent to the server. The server must call
-            // request() to pull a buffered message from the client.
-            //
-            // Note: the onReadyHandler's invocation is serialized on the same thread pool as the incoming
-            // StreamObserver's onNext(), onError(), and onComplete() handlers. Blocking the onReadyHandler will prevent
-            // additional messages from being processed by the incoming StreamObserver. The onReadyHandler must return
-            // in a timely manner or else message processing throughput will suffer.
-            requestStream.setOnReadyHandler(() -> {
-              // Start generating values from where we left off on a non-gRPC thread.
-              while (requestStream.isReady()) {
-                ResolveRequest request = requests.poll();
-                if (request == null) {
-                  if (allRequestsQueued.get()) {
-                    // Signals completion if there is nothing left to send.
-                    logger.debug("All requests are sent. Completing the request stream.");
-                    requestStream.onCompleted();
-                  } else {
-                    // More requests are going to be queued. We shouldn't block the thread and return.
-                    logger.debug("No more items in the queue, but more requests are expected.");
-                    break;
-                  }
-                } else {
-                  logger.debug("Requesting " + request);
-                  requestStream.onNext(request);
-                }
-              }
-            });
-          }
-
-          @Override
-          public void onNext(ResolveResponse response) {
-            logger.debug("<-- " + response.getOutcome() + " " + response.getResolvedAddress());
-            responses.add(response);
-            // Signal the sender to send one message. TODO: test increasing this response
-            requestStream.request(1);
-          }
-
-          @Override
-          public void onError(Throwable e) {
-            // TODO: figure out if the pipeline should fail if this happens.
-            logger.error("Failed to process requests", e);
-            failureProcessing.set(true);
-            allResponsesProcessed.countDown();
-          }
-
-          @Override
-          public void onCompleted() {
-            logger.debug("gRPC processing is complete.");
-            allResponsesProcessed.countDown();
-          }
-        };
-
-    // Note: clientResponseObserver is handling both request and response stream processing.
-    // TODO: do we need to close the streamObserver?
-    ZipResolverStub stub = ZipResolverGrpc.newStub(channel);
-    // TODO: shall we deal with deadlines?
-    // .withDeadlineAfter(timeoutSeconds, TimeUnit.SECONDS);
-    stub.zipResolverStreaming(clientResponseObserver);
+    callProcessor = new GRPCBidiCallProcessor<>();
+    callProcessor.start(requests, resolveResponseReceiver, starter);
   }
 
   @ProcessElement
@@ -248,6 +194,7 @@ public class ZipResolverDoFn extends DoFn<String, PartialAddress> {
         .setRequestId(requestId)
         .setZip(zip).build();
 
+    unprocessedRequests.put(requestId, request);
     requests.add(request);
 
     var bundleElement = new PCollectionElement();
@@ -261,34 +208,45 @@ public class ZipResolverDoFn extends DoFn<String, PartialAddress> {
   @FinishBundle
   public void finishBundle(FinishBundleContext context) {
     logger.debug("Bundle requests are queued. Waiting for the gRPC server to finish responding.");
-    allRequestsQueued = new AtomicBoolean(true);
     bundleSizeMetric.update(bundleSize);
 
-    while (true) {
-      try {
-        boolean success = allResponsesProcessed.await(timeoutSeconds * bundleSize, TimeUnit.SECONDS);
-        if(success) {
-          break;
-        } else {
-          throw new RuntimeException("Timeout exceeded");
-        }
-      } catch (InterruptedException e) {
-        logger.warn("Unexpected exception: ", e);
-      }
-    }
+    do {
+      callProcessor.allRequestsAreQueued();
+      boolean successfullyProcessed = callProcessor.waitUntilCompletion(Duration.standardMinutes(7));
 
-    if(failureProcessing.get()) {
+      boolean allRequestsAreProcessed = unprocessedRequests.size() == 0;
+      if (allRequestsAreProcessed) {
+        break;
+      }
+
+      if (successfullyProcessed) {
+        logger.warn(
+            "Something is not right - call processor returned success but there unprocessed requests");
+      }
+
       gRPCFailures.inc();
-      throw new RuntimeException("Failed to process the bundle.");
-    }
+
+      requests = new ConcurrentLinkedQueue<>();
+      unprocessedRequests.forEach((requestId, request) -> requests.add(request));
+      logger.warn(
+          "Failed to process the gRPC call. Will retry remaining " + requests.size()
+              + " requests.");
+
+      callProcessor = new GRPCBidiCallProcessor<>();
+      callProcessor.start(requests, resolveResponseReceiver, starter);
+    } while (true);
 
     logger.debug("gRPC processing is completed.");
     stopwatch.stop();
     grpcDurationMetric.update(stopwatch.elapsed(TimeUnit.MILLISECONDS) / bundleSize);
 
+    outputReceivedResults(context);
+  }
+
+  private void outputReceivedResults(DoFn<String, PartialAddress>.FinishBundleContext context) {
     responses.forEach(response -> {
           var requestId = response.getRequestId();
-          var pCollectionElement = bundleElementsByRequestId.get(requestId);
+          var pCollectionElement = bundleElementsByRequestId.remove(requestId);
           if (pCollectionElement == null) {
             throw new RuntimeException("Unable to find bundle element by id: " + requestId);
           }
@@ -319,15 +277,27 @@ public class ZipResolverDoFn extends DoFn<String, PartialAddress> {
 
   @Teardown
   public void tearDown() {
-    if(channel == null) {
-      return;
-    }
-    channel.shutdown();
+    channelLock.lock();
     try {
-      channel.awaitTermination(1, TimeUnit.SECONDS);
-    } catch (InterruptedException e) {
-      logger.warn("Interrupted while terminating gRPC channel:", e);
+      if (--numberOfChannelUsers > 0) {
+        logger.info(
+            "There are additional gRPC channel users, leaving it open for " + this.getClass()
+                .getName());
+        return;
+      }
+      if (channel == null) {
+        return;
+      }
+      logger.info("Shutting down the gRPC channel for " + this.getClass().getName());
+      channel.shutdown();
+      try {
+        channel.awaitTermination(1, TimeUnit.SECONDS);
+      } catch (InterruptedException e) {
+        logger.warn("Interrupted while terminating gRPC channel:", e);
+      }
+      channel = null;
+    } finally {
+      channelLock.unlock();
     }
   }
-
 }

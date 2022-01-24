@@ -20,8 +20,8 @@ set -u
 JOB_NAME="zip-resolver"
 MODE='streaming'
 
-# EXPERIMENTS=enable_recommendations,enable_google_cloud_profiler,enable_google_cloud_heap_sampling
-EXPERIMENTS=enable_recommendations
+EXPERIMENTS=enable_recommendations,enable_google_cloud_profiler,enable_google_cloud_heap_sampling
+#EXPERIMENTS=enable_recommendations
 RUNNER=dataflow
 
 if [ ${MODE} = 'streaming' ] ; then
@@ -42,6 +42,6 @@ set -x
  --experiments=${EXPERIMENTS}\
  --grpcHost=${GRPC_HOST}\
  --outputBucket=${OUTPUT_BUCKET}\
- --workerLogLevelOverrides={\"com.google.solutions.grpc.pipeline.ZipResolverDoFn\":\"DEBUG\"}\
+ --workerLogLevelOverrides={\"com.google.solutions.grpc.pipeline.ZipResolverDoFn\":\"INFO\"}\
  ${PARAMS}"
 
